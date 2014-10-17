@@ -978,7 +978,7 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
       // TODO: We may not want to bump 'transition' if we're called from a location change
       // that we've initiated ourselves, because we might accidentally abort a legitimate
       // transition initiated from code?
-      if (shouldTriggerReload(to, from, locals, options)) {
+      if (shouldTriggerReload(to, toParams, from, fromParams, locals, options)) {
         if (to.self.reloadOnSearch !== false) $urlRouter.update();
         $state.transition = null;
         return $q.when($state.current);
@@ -1361,10 +1361,62 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
     return $state;
   }
 
-  function shouldTriggerReload(to, from, locals, options) {
-    if (to === from && ((locals === from.locals && !options.reload) || (to.self.reloadOnSearch === false))) {
-      return true;
+  function shouldTriggerReload(to, toParams, from, fromParams, locals, options) {
+    if (to !== from) {
+      return false;
     }
+    return ((locals === from.locals && !options.reload) ||
+            (to.self.reloadOnSearch === false && pathParamsUnchanged(to, toParams, from, fromParams)));
+  }
+
+  function pathParamsUnchanged(to, toParams, from, fromParams) {
+    return angular.equals(
+      filterByKeys(getPathParamNames(to), toParams),
+      filterByKeys(getPathParamNames(from), fromParams)
+    );
+  }
+
+  function getPathParamNames(state) {
+    // Start by assuming all params are path params.
+    var pathParams = copy(paramsToArray(state.url.params));
+
+    // Get an array of search parameters.
+    var sourceSearch = state.url.sourceSearch;
+    if (sourceSearch[0] === '?') {
+      sourceSearch = sourceSearch.slice(1);
+    }
+
+    // Remove searchParams from the pathParams array.
+    var searchParams = sourceSearch.split('&');
+    if (searchParams.length) {
+      forEach(searchParams, function (param) {
+        var idx = indexOf(pathParams, param);
+        if (idx > -1) {
+          pathParams.splice(idx, 1);
+        }
+      });
+    }
+
+    return pathParams;
+  }
+
+  function paramsToArray(params) {
+    var keys,
+        p,
+        array = [];
+
+    if (params) {
+      do {
+        for (p in params) {
+          if (params.hasOwnProperty(p) && p[0] !== '$') {
+            array.push(p);
+          }
+        }
+        params = params.$$parent;
+      } while (params);
+    }
+
+    return array;
   }
 }
 

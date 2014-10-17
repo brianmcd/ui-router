@@ -1,6 +1,6 @@
 /**
  * State-based routing for AngularJS
- * @version v0.2.12
+ * @version v0.2.12-dev-2014-11-20
  * @link http://angular-ui.github.com/
  * @license MIT License, http://www.opensource.org/licenses/MIT
  */
@@ -187,7 +187,7 @@ function omit(obj) {
   var copy = {};
   var keys = Array.prototype.concat.apply(Array.prototype, Array.prototype.slice.call(arguments, 1));
   for (var key in obj) {
-    if (keys.indexOf(key) == -1) copy[key] = obj[key];
+    if (indexOf(keys, key) == -1) copy[key] = obj[key];
   }
   return copy;
 }
@@ -754,9 +754,11 @@ function UrlMatcher(pattern, config, parentMatcher) {
       compiled = '^', last = 0, m,
       segments = this.segments = [],
       parentParams = parentMatcher ? parentMatcher.params : {},
-      params = this.params = parentMatcher ? parentMatcher.params.$$new() : new $$UMFP.ParamSet();
+      params = this.params = parentMatcher ? parentMatcher.params.$$new() : new $$UMFP.ParamSet(),
+      paramNames = [];
 
   function addParameter(id, type, config, location) {
+    paramNames.push(id);
     if (parentParams[id]) return parentParams[id];
     if (!/^\w+(-+\w+)*(?:\[\])?$/.test(id)) throw new Error("Invalid parameter name '" + id + "' in pattern '" + pattern + "'");
     if (params[id]) throw new Error("Duplicate parameter name '" + id + "' in pattern '" + pattern + "'");
@@ -830,6 +832,7 @@ function UrlMatcher(pattern, config, parentMatcher) {
 
   this.regexp = new RegExp(compiled, config.caseInsensitive ? 'i' : undefined);
   this.prefix = segments[0];
+  this.$$paramNames = paramNames;
 }
 
 /**
@@ -945,7 +948,7 @@ UrlMatcher.prototype.exec = function (path, searchParams) {
  *    pattern has no parameters, an empty array is returned.
  */
 UrlMatcher.prototype.parameters = function (param) {
-  if (!isDefined(param)) return this.params.$$keys();
+  if (!isDefined(param)) return this.$$paramNames;
   return this.params[param] || null;
 };
 
@@ -1167,22 +1170,45 @@ Type.prototype.$asArray = function(mode, isSearch) {
       };
     }
 
-    function arrayHandler(callback, reducefn) {
-      // Wraps type functions to operate on each value of an array
+    // Wrap non-array value as array
+    function arrayWrap(val) { return isArray(val) ? val : (isDefined(val) ? [ val ] : []); }
+    // Unwrap array value for "auto" mode. Return undefined for empty array.
+    function arrayUnwrap(val) {
+      switch(val.length) {
+        case 0: return undefined;
+        case 1: return mode === "auto" ? val[0] : val;
+        default: return val;
+      }
+    }
+    function falsey(val) { return !val; }
+
+    // Wraps type (.is/.encode/.decode) functions to operate on each value of an array
+    function arrayHandler(callback, allTruthyMode) {
       return function handleArray(val) {
-        if (!isArray(val)) val = [ val ];
+        val = arrayWrap(val);
         var result = map(val, callback);
-        if (reducefn)
-          return result.reduce(reducefn, true);
-        return (result && result.length == 1 && mode === "auto") ? result[0] : result;
+        if (allTruthyMode === true)
+          return filter(result, falsey).length === 0;
+        return arrayUnwrap(result);
       };
     }
 
-    function alltruthy(val, memo) { return val && memo; }
+    // Wraps type (.equals) functions to operate on each value of an array
+    function arrayEqualsHandler(callback) {
+      return function handleArray(val1, val2) {
+        var left = arrayWrap(val1), right = arrayWrap(val2);
+        if (left.length !== right.length) return false;
+        for (var i = 0; i < left.length; i++) {
+          if (!callback(left[i], right[i])) return false;
+        }
+        return true;
+      };
+    }
+
     this.encode = arrayHandler(bindTo(this, type.encode));
     this.decode = arrayHandler(bindTo(this, type.decode));
-    this.equals = arrayHandler(bindTo(this, type.equals), alltruthy);
-    this.is     = arrayHandler(bindTo(this, type.is),     alltruthy);
+    this.is     = arrayHandler(bindTo(this, type.is), true);
+    this.equals = arrayEqualsHandler(bindTo(this, type.equals));
     this.pattern = type.pattern;
     this.$arrayMode = mode;
   }
@@ -1203,8 +1229,8 @@ function $UrlMatcherFactory() {
 
   var isCaseInsensitive = false, isStrictMode = true, defaultSquashPolicy = false;
 
-  function valToString(val) { return val != null ? val.toString().replace("/", "%2F") : val; }
-  function valFromString(val) { return val != null ? val.toString().replace("%2F", "/") : val; }
+  function valToString(val) { return val != null ? val.toString().replace(/\//g, "%2F") : val; }
+  function valFromString(val) { return val != null ? val.toString().replace(/%2F/g, "/") : val; }
   function angularEquals(left, right) { return angular.equals(left, right); }
 //  TODO: in 1.0, make string .is() return false if value is undefined by default.
 //  function regexpMatches(val) { /*jshint validthis:true */ return isDefined(val) && this.pattern.test(val); }
@@ -1506,27 +1532,23 @@ function $UrlMatcherFactory() {
 
   this.Param = function Param(id, type, config, location) {
     var self = this;
-    var defaultValueConfig = getDefaultValueConfig(config);
-    config = config || {};
+    config = unwrapShorthand(config);
     type = getType(config, type);
     var arrayMode = getArrayMode();
     type = arrayMode ? type.$asArray(arrayMode, location === "search") : type;
-    if (type.name === "string" && !arrayMode && location === "path" && defaultValueConfig.value === undefined)
-      defaultValueConfig.value = ""; // for 0.2.x; in 0.3.0+ do not automatically default to ""
-    var isOptional = defaultValueConfig.value !== undefined;
+    if (type.name === "string" && !arrayMode && location === "path" && config.value === undefined)
+      config.value = ""; // for 0.2.x; in 0.3.0+ do not automatically default to ""
+    var isOptional = config.value !== undefined;
     var squash = getSquashPolicy(config, isOptional);
     var replace = getReplace(config, arrayMode, isOptional, squash);
 
-    function getDefaultValueConfig(config) {
+    function unwrapShorthand(config) {
       var keys = isObject(config) ? objectKeys(config) : [];
       var isShorthand = indexOf(keys, "value") === -1 && indexOf(keys, "type") === -1 &&
                         indexOf(keys, "squash") === -1 && indexOf(keys, "array") === -1;
-      var configValue = isShorthand ? config : config.value;
-      var result = {
-        fn: isInjectable(configValue) ? configValue : function () { return result.value; },
-        value: configValue
-      };
-      return result;
+      if (isShorthand) config = { value: config };
+      config.$$fn = isInjectable(config.value) ? config.value : function () { return config.value; };
+      return config;
     }
 
     function getType(config, urlType) {
@@ -1571,7 +1593,7 @@ function $UrlMatcherFactory() {
      */
     function $$getDefaultValue() {
       if (!injector) throw new Error("Injectable functions cannot be called at configuration time");
-      return injector.invoke(defaultValueConfig.fn);
+      return injector.invoke(config.$$fn);
     }
 
     /**
@@ -3050,7 +3072,7 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
       // TODO: We may not want to bump 'transition' if we're called from a location change
       // that we've initiated ourselves, because we might accidentally abort a legitimate
       // transition initiated from code?
-      if (shouldTriggerReload(to, from, locals, options)) {
+      if (shouldTriggerReload(to, toParams, from, fromParams, locals, options)) {
         if (to.self.reloadOnSearch !== false) $urlRouter.update();
         $state.transition = null;
         return $q.when($state.current);
@@ -3243,15 +3265,9 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
       options = extend({ relative: $state.$current }, options || {});
       var state = findState(stateOrName, options.relative);
 
-      if (!isDefined(state)) {
-        return undefined;
-      }
-
-      if ($state.$current !== state) {
-        return false;
-      }
-
-      return isDefined(params) && params !== null ? angular.equals($stateParams, params) : true;
+      if (!isDefined(state)) { return undefined; }
+      if ($state.$current !== state) { return false; }
+      return params ? equalForKeys(state.params.$$values(params), $stateParams) : true;
     };
 
     /**
@@ -3315,13 +3331,9 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
       }
 
       var state = findState(stateOrName, options.relative);
-      if (!isDefined(state)) {
-        return undefined;
-      }
-      if (!isDefined($state.$current.includes[state.name])) {
-        return false;
-      }
-      return equalForKeys(params, $stateParams);
+      if (!isDefined(state)) { return undefined; }
+      if (!isDefined($state.$current.includes[state.name])) { return false; }
+      return params ? equalForKeys(state.params.$$values(params), $stateParams, objectKeys(params)) : true;
     };
 
 
@@ -3443,10 +3455,62 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
     return $state;
   }
 
-  function shouldTriggerReload(to, from, locals, options) {
-    if (to === from && ((locals === from.locals && !options.reload) || (to.self.reloadOnSearch === false))) {
-      return true;
+  function shouldTriggerReload(to, toParams, from, fromParams, locals, options) {
+    if (to !== from) {
+      return false;
     }
+    return ((locals === from.locals && !options.reload) ||
+            (to.self.reloadOnSearch === false && pathParamsUnchanged(to, toParams, from, fromParams)));
+  }
+
+  function pathParamsUnchanged(to, toParams, from, fromParams) {
+    return angular.equals(
+      filterByKeys(getPathParamNames(to), toParams),
+      filterByKeys(getPathParamNames(from), fromParams)
+    );
+  }
+
+  function getPathParamNames(state) {
+    // Start by assuming all params are path params.
+    var pathParams = copy(paramsToArray(state.url.params));
+
+    // Get an array of search parameters.
+    var sourceSearch = state.url.sourceSearch;
+    if (sourceSearch[0] === '?') {
+      sourceSearch = sourceSearch.slice(1);
+    }
+
+    // Remove searchParams from the pathParams array.
+    var searchParams = sourceSearch.split('&');
+    if (searchParams.length) {
+      forEach(searchParams, function (param) {
+        var idx = indexOf(pathParams, param);
+        if (idx > -1) {
+          pathParams.splice(idx, 1);
+        }
+      });
+    }
+
+    return pathParams;
+  }
+
+  function paramsToArray(params) {
+    var keys,
+        p,
+        array = [];
+
+    if (params) {
+      do {
+        for (p in params) {
+          if (params.hasOwnProperty(p) && p[0] !== '$') {
+            array.push(p);
+          }
+        }
+        params = params.$$parent;
+      } while (params);
+    }
+
+    return array;
   }
 }
 
@@ -4137,14 +4201,10 @@ function $StateRefActiveDirective($state, $stateParams, $interpolate) {
 
       function isMatch() {
         if (typeof $attrs.uiSrefActiveEq !== 'undefined') {
-          return $state.$current.self === state && matchesParams();
+          return state && $state.is(state.name, params);
         } else {
-          return state && $state.includes(state.name) && matchesParams();
+          return state && $state.includes(state.name, params);
         }
-      }
-
-      function matchesParams() {
-        return !params || equalForKeys(params, $stateParams);
       }
     }]
   };
